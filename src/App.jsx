@@ -5,6 +5,7 @@ import "./App.css";
 const PILIHAN_DURASI = [15, 30, 60];
 const KUNCI_RIWAYAT = "typing-riwayat";
 const KUNCI_REKOR = "typing-rekor";
+const KUNCI_TEMA = "typing-tema";
 
 // localStorage bisa error (mis. mode privat), jadi selalu dibungkus try/catch
 const bacaStorage = (kunci, awal) => {
@@ -33,6 +34,108 @@ const formatTanggal = (ms) => {
   );
 };
 
+const temaAwal = () =>
+  bacaStorage(KUNCI_TEMA, null) ??
+  (window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light");
+
+function GrafikWpm({ data }) {
+  if (data.length < 2) return null;
+
+  // kanvas virtual 800x260, nanti otomatis diskalakan oleh viewBox
+  const L = 800;
+  const T = 260;
+  const pad = { kiri: 44, kanan: 16, atas: 16, bawah: 28 };
+  const lebar = L - pad.kiri - pad.kanan;
+  const tinggi = T - pad.atas - pad.bawah;
+
+  const maksDetik = data[data.length - 1].detik;
+  const maksWpm = Math.max(10, ...data.map((d) => Math.max(d.wpm, d.mentah)));
+  const yMaks = Math.ceil(maksWpm / 20) * 20; // bulatkan ke atas, kelipatan 20
+
+  // fungsi skala: data -> koordinat piksel
+  const x = (detik) => pad.kiri + (detik / maksDetik) * lebar;
+  const y = (wpm) => pad.atas + tinggi - (wpm / yMaks) * tinggi;
+
+  const garis = (kunci) =>
+    data
+      .map((d, i) => `${i === 0 ? "M" : "L"}${x(d.detik)},${y(d[kunci])}`)
+      .join(" ");
+
+  const tandaY = [0, 0.25, 0.5, 0.75, 1].map((p) => Math.round(p * yMaks));
+  const langkah = maksDetik <= 15 ? 3 : maksDetik <= 30 ? 5 : 10;
+  const tandaX = Array.from(
+    { length: Math.floor(maksDetik / langkah) },
+    (_, i) => (i + 1) * langkah,
+  );
+
+  return (
+    <div className="grafik-wadah">
+      <svg
+        viewBox={`0 0 ${L} ${T}`}
+        className="grafik"
+        role="img"
+        aria-label="Grafik WPM per detik"
+      >
+        {tandaY.map((v) => (
+          <g key={v}>
+            <line
+              x1={pad.kiri}
+              x2={L - pad.kanan}
+              y1={y(v)}
+              y2={y(v)}
+              className="g-grid"
+            />
+            <text
+              x={pad.kiri - 8}
+              y={y(v) + 4}
+              textAnchor="end"
+              className="g-label"
+            >
+              {v}
+            </text>
+          </g>
+        ))}
+
+        {tandaX.map((t) => (
+          <text
+            key={t}
+            x={x(t)}
+            y={T - 8}
+            textAnchor="middle"
+            className="g-label"
+          >
+            {t}s
+          </text>
+        ))}
+
+        <path d={garis("mentah")} className="g-mentah" />
+        <path d={garis("wpm")} className="g-wpm" />
+
+        {data
+          .filter((d) => d.salah > 0)
+          .map((d) => (
+            <text
+              key={d.detik}
+              x={x(d.detik)}
+              y={y(d.wpm) - 8}
+              textAnchor="middle"
+              className="g-salah"
+            >
+              ×
+            </text>
+          ))}
+      </svg>
+      <p className="legenda">
+        <span className="lg-wpm">━ wpm</span>
+        <span className="lg-mentah">━ raw</span>
+        <span className="lg-salah">× salah</span>
+      </p>
+    </div>
+  );
+}
+
 export default function App() {
   const [teks, setTeks] = useState(ambilTeksAcak);
   const [input, setInput] = useState("");
@@ -41,15 +144,54 @@ export default function App() {
   const [sisa, setSisa] = useState(30);
   const [status, setStatus] = useState("menunggu"); // menunggu | berjalan | selesai
   const inputRef = useRef(null);
+  const teksRef = useRef(null);
   const totalKetikan = useRef(0); // semua huruf yang pernah diketik
   const totalSalah = useRef(0); // semua ketikan salah (walau sudah dihapus)
+  const catatan = useRef([]); // satu sampel per detik
+  const detikRef = useRef(0); // detik yang sudah berlalu
+  const benarRef = useRef(0); // jumlah huruf benar saat ini
+  const salahSebelumnya = useRef(0); // untuk menghitung salah per detik
   const [riwayat, setRiwayat] = useState(() => bacaStorage(KUNCI_RIWAYAT, []));
   const [rekor, setRekor] = useState(() => bacaStorage(KUNCI_REKOR, {}));
   const [rekorBaru, setRekorBaru] = useState(false);
+  const [tema, setTema] = useState(temaAwal);
+
+  useEffect(() => {
+    const wadah = teksRef.current;
+    const kursor = wadah?.querySelector(".kursor");
+    if (!wadah || !kursor) return;
+    const tinggiBaris = parseFloat(getComputedStyle(wadah).lineHeight);
+    wadah.scrollTop = Math.max(0, kursor.offsetTop - tinggiBaris);
+  }, [input, teks]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = tema;
+    simpanStorage(KUNCI_TEMA, tema);
+  }, [tema]);
+
+  const gantiTema = () => {
+    setTema((t) => (t === "dark" ? "light" : "dark"));
+    inputRef.current?.focus(); // supaya tidak perlu klik teks lagi
+  };
 
   useEffect(() => {
     if (status !== "berjalan") return;
-    const id = setInterval(() => setSisa((s) => s - 1), 1000);
+
+    const id = setInterval(() => {
+      detikRef.current += 1;
+      const t = detikRef.current;
+
+      catatan.current.push({
+        detik: t,
+        wpm: Math.round(benarRef.current / 5 / (t / 60)),
+        mentah: Math.round(totalKetikan.current / 5 / (t / 60)),
+        salah: totalSalah.current - salahSebelumnya.current,
+      });
+      salahSebelumnya.current = totalSalah.current;
+
+      setSisa((s) => s - 1);
+    }, 1000);
+
     return () => clearInterval(id);
   }, [status]);
 
@@ -69,6 +211,12 @@ export default function App() {
       if (nilai[idx] !== teks[idx]) totalSalah.current += 1;
     }
 
+    let benar = 0;
+    for (let i = 0; i < nilai.length; i++) {
+      if (nilai[i] === teks[i]) benar++;
+    }
+    benarRef.current = benar;
+
     if (status === "menunggu" && nilai.length > 0) setStatus("berjalan");
     setInput(nilai);
     if (nilai.length === teks.length) setStatus("selesai");
@@ -85,6 +233,10 @@ export default function App() {
       totalKetikan.current = 0;
       totalSalah.current = 0;
       inputRef.current?.focus();
+      catatan.current = [];
+      detikRef.current = 0;
+      benarRef.current = 0;
+      salahSebelumnya.current = 0;
     },
     [durasi],
   );
@@ -161,118 +313,130 @@ export default function App() {
 
   return (
     <div className="app">
-      <h1>HOHOHO</h1>
+      <header className="atas">
+        <h1>HOHOHO</h1>
 
-      <div className="bar">
-        <div className="durasi">
-          {PILIHAN_DURASI.map((d) => (
-            <button
-              key={d}
-              className={d === durasi ? "aktif" : ""}
-              onClick={() => mulaiUlang(d)}
-            >
-              {d}
+        <div className="kontrol">
+          <div className="durasi">
+            {PILIHAN_DURASI.map((d) => (
+              <button
+                key={d}
+                className={d === durasi ? "aktif" : ""}
+                onClick={() => mulaiUlang(d)}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
+          <span className="rekor">
+            rekor {durasi}s: {rekor[durasi] ?? "-"} wpm
+          </span>
+          <button className="tema" onClick={gantiTema} aria-label="Ganti tema">
+            {tema === "dark" ? "☀" : "☾"}
+          </button>
+          <div className="timer">{sisa}</div>
+        </div>
+      </header>
+
+      <div className="isi">
+        <main className="utama">
+          <div className="area" onClick={() => inputRef.current?.focus()}>
+            <div ref={teksRef} className={`teks ${tampilBuram ? "buram" : ""}`}>
+              {teks.split("").map((huruf, i) => {
+                let kelas = "belum";
+                if (i < input.length) {
+                  kelas = input[i] === huruf ? "benar" : "salah";
+                }
+                if (i === input.length && status !== "selesai")
+                  kelas += " kursor";
+                return (
+                  <span key={i} className={kelas}>
+                    {huruf}
+                  </span>
+                );
+              })}
+            </div>
+
+            {tampilBuram && (
+              <div className="overlay">Klik di sini untuk lanjut mengetik</div>
+            )}
+
+            <input
+              ref={inputRef}
+              className="input-tersembunyi"
+              value={input}
+              onChange={handleChange}
+              onFocus={() => setFokus(true)}
+              onBlur={() => setFokus(false)}
+              readOnly={status === "selesai"}
+              autoFocus
+            />
+          </div>
+
+          <div className="aksi">
+            <button className="ulang" onClick={() => mulaiUlang()}>
+              ↻ Ulang
             </button>
-          ))}
-        </div>
-        <div className="timer">{sisa}</div>
+            <p className="petunjuk">
+              <kbd>tab</kbd> + <kbd>enter</kbd> untuk mengulang
+            </p>
+          </div>
+          {hasil && <GrafikWpm data={catatan.current} />}
+        </main>
+
+        <aside className="samping">
+          {hasil && (
+            <div className="hasil">
+              <div className="kartu besar">
+                <span className="label">wpm</span>
+                <span className="angka">{hasil.wpm}</span>
+                {rekorBaru && <span className="badge">rekor baru!</span>}
+              </div>
+              <div className="kartu">
+                <span className="label">akurasi</span>
+                <span className="angka">{hasil.akurasi}%</span>
+              </div>
+              <div className="kartu">
+                <span className="label">salah</span>
+                <span className="angka">{hasil.salah}</span>
+              </div>
+              <div className="kartu">
+                <span className="label">waktu</span>
+                <span className="angka">{hasil.waktu}s</span>
+              </div>
+            </div>
+          )}
+
+          {riwayat.length > 0 && (
+            <div className="riwayat">
+              <div className="riwayat-kepala">
+                <h2>Riwayat</h2>
+                <button onClick={hapusRiwayat}>hapus</button>
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>waktu</th>
+                    <th>mode</th>
+                    <th>wpm</th>
+                    <th>akurasi</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {riwayat.slice(0, 8).map((r) => (
+                    <tr key={r.tanggal}>
+                      <td>{formatTanggal(r.tanggal)}</td>
+                      <td>{r.durasi}s</td>
+                      <td>{r.wpm}</td>
+                      <td>{r.akurasi}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </aside>
       </div>
-
-      {riwayat.length > 0 && (
-        <div className="riwayat">
-          <div className="riwayat-kepala">
-            <h2>Riwayat</h2>
-            <button onClick={hapusRiwayat}>hapus</button>
-          </div>
-          <table>
-            <thead>
-              <tr>
-                <th>waktu</th>
-                <th>mode</th>
-                <th>wpm</th>
-                <th>akurasi</th>
-              </tr>
-            </thead>
-            <tbody>
-              {riwayat.slice(0, 8).map((r) => (
-                <tr key={r.tanggal}>
-                  <td>{formatTanggal(r.tanggal)}</td>
-                  <td>{r.durasi}s</td>
-                  <td>{r.wpm}</td>
-                  <td>{r.akurasi}%</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <p className="rekor">
-        rekor {durasi}s: {rekor[durasi] ?? "-"} wpm
-      </p>
-
-      <div className="area" onClick={() => inputRef.current?.focus()}>
-        <div className={`teks ${tampilBuram ? "buram" : ""}`}>
-          {teks.split("").map((huruf, i) => {
-            let kelas = "belum";
-            if (i < input.length) {
-              kelas = input[i] === huruf ? "benar" : "salah";
-            }
-            if (i === input.length && status !== "selesai") kelas += " kursor";
-            return (
-              <span key={i} className={kelas}>
-                {huruf}
-              </span>
-            );
-          })}
-        </div>
-
-        {tampilBuram && (
-          <div className="overlay">Klik di sini untuk lanjut mengetik</div>
-        )}
-
-        <input
-          ref={inputRef}
-          className="input-tersembunyi"
-          value={input}
-          onChange={handleChange}
-          onFocus={() => setFokus(true)}
-          onBlur={() => setFokus(false)}
-          readOnly={status === "selesai"}
-          autoFocus
-        />
-      </div>
-
-      <div className="aksi">
-        <button className="ulang" onClick={() => mulaiUlang()}>
-          ↻ Ulang
-        </button>
-        <p className="petunjuk">
-          <kbd>tab</kbd> + <kbd>enter</kbd> untuk mengulang
-        </p>
-      </div>
-
-      {hasil && (
-        <div className="hasil">
-          <div className="kartu besar">
-            <span className="label">wpm</span>
-            <span className="angka">{hasil.wpm}</span>
-            {rekorBaru && <span className="badge">rekor baru!</span>}
-          </div>
-          <div className="kartu">
-            <span className="label">akurasi</span>
-            <span className="angka">{hasil.akurasi}%</span>
-          </div>
-          <div className="kartu">
-            <span className="label">salah</span>
-            <span className="angka">{hasil.salah}</span>
-          </div>
-          <div className="kartu">
-            <span className="label">waktu</span>
-            <span className="angka">{hasil.waktu}s</span>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

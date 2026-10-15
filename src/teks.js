@@ -1,13 +1,13 @@
-export const daftarTeks = [
-  "belajar sedikit setiap hari lebih baik daripada belajar banyak sekali",
-  "kode yang bersih mudah dibaca dan mudah diperbaiki oleh siapa saja",
-  "hujan turun perlahan sementara kopi hangat menemani malam yang tenang",
-  "ketekunan mengalahkan bakat ketika bakat tidak mau berusaha keras",
-  "setiap program besar dimulai dari satu baris kode yang sederhana",
-];
+import daftarKata from "./kata-besar.json";
 
-export const ambilTeksAcak = (jumlah = 4) =>
-  [...daftarTeks]
-    .sort(() => Math.random() - 0.5)
-    .slice(0, jumlah)
-    .join(" ");
+export const ambilTeksAcak = (jumlah = 200) => {
+  const hasil = [];
+  let terakhir = "";
+  while (hasil.length < jumlah) {
+    const kata = daftarKata[Math.floor(Math.random() * daftarKata.length)];
+    if (kata === terakhir) continue;
+    hasil.push(kata);
+    terakhir = kata;
+  }
+  return hasil.join(" ");
+};
